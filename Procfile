@@ -1,1 +1,1 @@
-worker: python practice.py
+worker: python main.py
