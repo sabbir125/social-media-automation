@@ -1,76 +1,94 @@
+import logging
+from dataclasses import dataclass
+
 from src.config import INSTAGRAM_URL
 from src.core.auth import get_authenticated_driver
 from src.core.scraper import get_stories, get_posts
-from src.data.account_repo import delete_account
-from src.data.target_repo import get_usernames, get_scrape_flags, get_client_data
-from src.infrastructure.driver import close_driver
-from src.core.errors import handle_network_error
+from src.data.account_repo import Account, remove_account
+from src.data.target_repo import TargetAccount, load_targets
+from src.infrastructure.driver import quit_driver
+from src.core.errors import check_network_error
+
+logger = logging.getLogger(__name__)
 
 
-def _make_entry(username, links, client_data):
-    if links:
-        return {"username": username, "links": links, "client_data": client_data}
-    return None
+@dataclass
+class ScrapeResult:
+    username: str
+    links: list
+    client_data: list
 
 
-def run():
-    auth = get_authenticated_driver(INSTAGRAM_URL)
-    if not auth["success"]:
-        return {"success": False, "error": "listEmpty"}
+def _rotate_account(current_account: Account, driver):
+    """Removes the bad account, closes the driver, and authenticates a new one."""
+    logger.warning("Rotating account away from: %s", current_account.username)
+    remove_account(current_account)
+    quit_driver(driver)
+    return get_authenticated_driver(INSTAGRAM_URL)  # raises if no accounts left
 
-    driver = auth["driver"]
-    account = auth["data"]
-    usernames = get_usernames()
-    scrape_flags = get_scrape_flags()
-    client_data_list = get_client_data()
-    results = []
 
-    for i, username in enumerate(usernames):
-        scrape_story = scrape_flags[i][0] == "TRUE"
-        scrape_post = scrape_flags[i][1] == "TRUE"
-        client_data = client_data_list[i]
+def _scrape_target(target: TargetAccount, driver, account: Account):
+    """
+    Scrapes stories and/or posts for a single target.
+    Returns (combined_links, driver, account) — driver/account may change on rotation.
+    """
+    combined = []
 
+    if target.scrape_stories:
+        result = get_stories(target.username, driver, INSTAGRAM_URL)
+        if not result["success"] and result["error"] == "account":
+            driver, account = _rotate_account(account, driver)
+            result = get_stories(target.username, driver, INSTAGRAM_URL)
+        if result["success"]:
+            combined += result["data"]
+
+    if target.scrape_posts:
+        result = get_posts(target.username, driver, INSTAGRAM_URL)
+        if not result["success"] and result["error"] == "account":
+            driver, account = _rotate_account(account, driver)
+            result = get_posts(target.username, driver, INSTAGRAM_URL)
+        if result["success"]:
+            combined += result["data"]
+
+    return combined, driver, account
+
+
+def run() -> bool:
+    """
+    Main scrape cycle. Iterates over all targets and scrapes stories/posts.
+    Returns True on completion, False on unrecoverable error.
+    """
+    try:
+        driver, account = get_authenticated_driver(INSTAGRAM_URL)
+    except RuntimeError as e:
+        logger.error("Cannot start scrape cycle: %s", e)
+        return False
+
+    targets = load_targets()
+    if not targets:
+        logger.error("No targets loaded. Check %s", "data/targets.csv")
+        quit_driver(driver)
+        return False
+
+    results: list[ScrapeResult] = []
+
+    for target in targets:
+        logger.info("Processing: %s (stories=%s, posts=%s)",
+                    target.username, target.scrape_stories, target.scrape_posts)
         try:
-            combined = []
-
-            if scrape_story:
-                story_result = get_stories(username, driver, INSTAGRAM_URL)
-                if not story_result["success"]:
-                    if story_result["error"] == "account":
-                        delete_account(account)
-                        close_driver(driver)
-                        auth = get_authenticated_driver(INSTAGRAM_URL)
-                        if not auth["success"]:
-                            return {"success": False, "error": "listEmpty"}
-                        driver, account = auth["driver"], auth["data"]
-                        story_result = get_stories(username, driver, INSTAGRAM_URL)
-                if story_result["success"]:
-                    combined += story_result["data"]
-
-            if scrape_post:
-                post_result = get_posts(username, driver, INSTAGRAM_URL)
-                if not post_result["success"]:
-                    if post_result["error"] == "account":
-                        delete_account(account)
-                        close_driver(driver)
-                        auth = get_authenticated_driver(INSTAGRAM_URL)
-                        if not auth["success"]:
-                            return {"success": False, "error": "listEmpty"}
-                        driver, account = auth["driver"], auth["data"]
-                        post_result = get_posts(username, driver, INSTAGRAM_URL)
-                if post_result["success"]:
-                    combined += post_result["data"]
-
-            entry = _make_entry(username, combined, client_data)
-            if entry:
-                results.append(entry)
-                print(entry)
-
+            links, driver, account = _scrape_target(target, driver, account)
+            if links:
+                results.append(ScrapeResult(target.username, links, target.client_data))
+                logger.info("Collected %d items for %s", len(links), target.username)
+        except RuntimeError as e:
+            logger.error("Account pool exhausted during scrape: %s", e)
+            return False
         except Exception:
-            driver.refresh()
-            handle_network_error(driver)
-            return {"success": False, "error": "network"}
+            logger.exception("Unexpected error on target: %s", target.username)
+            check_network_error(driver)
+            quit_driver(driver)
+            return False
 
-    close_driver(driver)
-    print(results)
-    return {"success": True}
+    quit_driver(driver)
+    logger.info("Cycle complete. Processed %d targets, collected data for %d.", len(targets), len(results))
+    return True

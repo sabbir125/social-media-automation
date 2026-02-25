@@ -1,23 +1,40 @@
 import csv
+import logging
+from dataclasses import dataclass, field
 from src.config import TARGETS_CSV
 
-
-def read_targets():
-    with open(TARGETS_CSV, "r") as f:
-        reader = csv.reader(f)
-        next(reader)  # skip header
-        return [line for line in reader if line]
+logger = logging.getLogger(__name__)
 
 
-def get_usernames():
-    return [row[0] for row in read_targets()]
+@dataclass
+class TargetAccount:
+    username: str
+    scrape_stories: bool
+    scrape_posts: bool
+    client_data: list = field(default_factory=list)
 
 
-def get_scrape_flags():
-    """Returns list of [story_flag, post_flag] per target row."""
-    return [row[1:3] for row in read_targets()]
+def load_targets() -> list[TargetAccount]:
+    """
+    Reads targets.csv and returns a list of TargetAccount dataclasses.
 
-
-def get_client_data():
-    """Returns client metadata columns (3-28) per target row."""
-    return [row[3:28] for row in read_targets()]
+    Expected columns:
+        username, is_story, is_post, [client_data_cols...]
+    """
+    targets = []
+    try:
+        with open(TARGETS_CSV, newline="") as f:
+            reader = csv.reader(f)
+            next(reader, None)  # skip header
+            for row in reader:
+                if not row or not row[0].strip():
+                    continue
+                targets.append(TargetAccount(
+                    username=row[0].strip(),
+                    scrape_stories=row[1].strip().upper() == "TRUE" if len(row) > 1 else False,
+                    scrape_posts=row[2].strip().upper() == "TRUE" if len(row) > 2 else False,
+                    client_data=row[3:28] if len(row) > 3 else [],
+                ))
+    except FileNotFoundError:
+        logger.error("Targets file not found: %s", TARGETS_CSV)
+    return targets
