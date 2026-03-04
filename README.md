@@ -1,6 +1,6 @@
-# Social Media Scraper
+# Social Media Automation
 
-Automated Instagram scraper that collects stories and posts from target accounts using Selenium. Credentials are managed via CSV, sessions are persisted with cookies, and scraped data is stored in MongoDB.
+Automated Instagram that collects stories and posts from target accounts using Selenium. Credentials are managed via CSV, sessions are persisted with cookies, and scraped data is stored in MongoDB.
 
 ## Features
 
